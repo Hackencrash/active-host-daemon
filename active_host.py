@@ -9,12 +9,14 @@ daemon loop or Home Assistant integration.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import logging.handlers
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -95,6 +97,272 @@ class ScreenSharingHostDetector:
         if self.system_state.is_screen_sharing_connected():
             return Host.REMOTE
         return Host.LOCAL
+
+
+class QuartzHostDetector:
+    """Finite state machine driven by local input and an edge-transfer gesture."""
+
+    def __init__(
+        self,
+        system_state: SystemState,
+        edge_delay: float = 0.75,
+        minimum_horizontal_travel: float = 100.0,
+    ) -> None:
+        self.system_state = system_state
+        self.edge_delay = edge_delay
+        self.minimum_horizontal_travel = minimum_horizontal_travel
+        self._state = Host.LOCAL
+        self._control_held = False
+        self._pointer_x: float | None = None
+        self._active_left_edge: float | None = None
+        self._approach_start_x: float | None = None
+        self._edge_timer: Any = None
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._startup_error: RuntimeError | None = None
+        self._quartz: Any = None
+        self._event_tap: Any = None
+        self._run_loop: Any = None
+        self._callback = self._handle_event
+        self._timer_callback = self._edge_dwell_completed
+
+        thread = threading.Thread(
+            target=self._run_event_tap,
+            name="quartz-event-tap",
+            daemon=True,
+        )
+        thread.start()
+        if not self._ready.wait(timeout=5):
+            raise RuntimeError("timed out while starting Quartz event tap")
+        if self._startup_error is not None:
+            raise self._startup_error
+
+    def current_host(self) -> Host:
+        with self._lock:
+            return self._state
+
+    def _run_event_tap(self) -> None:
+        try:
+            quartz = importlib.import_module("Quartz")
+            self._quartz = quartz
+            event_types = (
+                quartz.kCGEventLeftMouseDown,
+                quartz.kCGEventLeftMouseUp,
+                quartz.kCGEventRightMouseDown,
+                quartz.kCGEventRightMouseUp,
+                quartz.kCGEventOtherMouseDown,
+                quartz.kCGEventOtherMouseUp,
+                quartz.kCGEventMouseMoved,
+                quartz.kCGEventLeftMouseDragged,
+                quartz.kCGEventRightMouseDragged,
+                quartz.kCGEventOtherMouseDragged,
+                quartz.kCGEventScrollWheel,
+                quartz.kCGEventKeyDown,
+                quartz.kCGEventKeyUp,
+                quartz.kCGEventFlagsChanged,
+            )
+            event_mask = 0
+            for event_type in event_types:
+                event_mask |= quartz.CGEventMaskBit(event_type)
+
+            self._event_tap = quartz.CGEventTapCreate(
+                quartz.kCGSessionEventTap,
+                quartz.kCGHeadInsertEventTap,
+                quartz.kCGEventTapOptionListenOnly,
+                event_mask,
+                self._callback,
+                None,
+            )
+            if self._event_tap is None:
+                raise RuntimeError(
+                    "could not create Quartz event tap; grant Accessibility permission"
+                )
+
+            source = quartz.CFMachPortCreateRunLoopSource(None, self._event_tap, 0)
+            self._run_loop = quartz.CFRunLoopGetCurrent()
+            quartz.CFRunLoopAddSource(
+                self._run_loop, source, quartz.kCFRunLoopCommonModes
+            )
+            quartz.CGEventTapEnable(self._event_tap, True)
+            self._ready.set()
+            quartz.CFRunLoopRun()
+        except (ImportError, RuntimeError) as exc:
+            self._startup_error = RuntimeError(f"failed to start Quartz detector: {exc}")
+            self._ready.set()
+
+    def _handle_event(
+        self, _proxy: Any, event_type: int, event: Any, _refcon: Any
+    ) -> Any:
+        quartz = self._quartz
+        if event_type in (
+            quartz.kCGEventTapDisabledByTimeout,
+            quartz.kCGEventTapDisabledByUserInput,
+        ):
+            quartz.CGEventTapEnable(self._event_tap, True)
+            return event
+
+        observed_events = (
+            quartz.kCGEventLeftMouseDown,
+            quartz.kCGEventLeftMouseUp,
+            quartz.kCGEventRightMouseDown,
+            quartz.kCGEventRightMouseUp,
+            quartz.kCGEventOtherMouseDown,
+            quartz.kCGEventOtherMouseUp,
+            quartz.kCGEventMouseMoved,
+            quartz.kCGEventLeftMouseDragged,
+            quartz.kCGEventRightMouseDragged,
+            quartz.kCGEventOtherMouseDragged,
+            quartz.kCGEventScrollWheel,
+            quartz.kCGEventKeyDown,
+            quartz.kCGEventKeyUp,
+            quartz.kCGEventFlagsChanged,
+        )
+        genuine_activity_events = (
+            quartz.kCGEventLeftMouseDown,
+            quartz.kCGEventLeftMouseUp,
+            quartz.kCGEventRightMouseDown,
+            quartz.kCGEventRightMouseUp,
+            quartz.kCGEventOtherMouseDown,
+            quartz.kCGEventOtherMouseUp,
+            quartz.kCGEventMouseMoved,
+            quartz.kCGEventLeftMouseDragged,
+            quartz.kCGEventRightMouseDragged,
+            quartz.kCGEventOtherMouseDragged,
+            quartz.kCGEventScrollWheel,
+            quartz.kCGEventKeyDown,
+        )
+        mouse_movement_events = (
+            quartz.kCGEventMouseMoved,
+            quartz.kCGEventLeftMouseDragged,
+            quartz.kCGEventRightMouseDragged,
+            quartz.kCGEventOtherMouseDragged,
+        )
+
+        if event_type not in observed_events:
+            return event
+
+        flags = quartz.CGEventGetFlags(event)
+        control_held = bool(flags & quartz.kCGEventFlagMaskControl)
+
+        with self._lock:
+            if self._state is Host.REMOTE:
+                if event_type not in genuine_activity_events:
+                    return event
+                self._transition_to_local_locked()
+
+            self._control_held = control_held
+            if event_type in mouse_movement_events:
+                location = quartz.CGEventGetLocation(event)
+                active_left_edge = self._display_left_edge(location)
+                previous_x = self._pointer_x
+                self._pointer_x = location.x
+                moving_towards_edge = (
+                    previous_x is not None and location.x < previous_x
+                )
+
+                if active_left_edge != self._active_left_edge:
+                    self._active_left_edge = active_left_edge
+                    self._approach_start_x = None
+                    self._cancel_edge_dwell_locked()
+
+                if moving_towards_edge and self._control_held:
+                    if self._approach_start_x is None:
+                        self._approach_start_x = previous_x
+                elif previous_x is not None and location.x > previous_x:
+                    self._approach_start_x = None
+                    self._cancel_edge_dwell_locked()
+
+                horizontal_travel = (
+                    self._approach_start_x - location.x
+                    if self._approach_start_x is not None
+                    else 0.0
+                )
+                at_edge = location.x <= active_left_edge
+                if (
+                    at_edge
+                    and self._control_held
+                    and horizontal_travel >= self.minimum_horizontal_travel
+                    and self._edge_timer is None
+                ):
+                    self._start_edge_dwell_locked()
+                elif not at_edge:
+                    self._cancel_edge_dwell_locked()
+
+            if not self._control_held:
+                self._approach_start_x = None
+                self._cancel_edge_dwell_locked()
+        return event
+
+    def _display_left_edge(self, location: Any) -> float:
+        quartz = self._quartz
+        error, displays, display_count = quartz.CGGetDisplaysWithPoint(
+            location, 1, None, None
+        )
+        if error == quartz.kCGErrorSuccess and display_count:
+            display_id = displays[0]
+        else:
+            display_id = quartz.CGMainDisplayID()
+        return float(quartz.CGDisplayBounds(display_id).origin.x)
+
+    def _transition_to_local_locked(self) -> None:
+        self._state = Host.LOCAL
+        self._cancel_edge_dwell_locked()
+
+    def _start_edge_dwell_locked(self) -> None:
+        self._cancel_edge_dwell_locked()
+        quartz = self._quartz
+        fire_at = quartz.CFAbsoluteTimeGetCurrent() + self.edge_delay
+        self._edge_timer = quartz.CFRunLoopTimerCreateWithHandler(
+            None,
+            fire_at,
+            0.0,
+            0,
+            0,
+            self._timer_callback,
+        )
+        quartz.CFRunLoopAddTimer(
+            self._run_loop,
+            self._edge_timer,
+            quartz.kCFRunLoopCommonModes,
+        )
+
+    def _cancel_edge_dwell_locked(self) -> None:
+        if self._edge_timer is not None:
+            self._quartz.CFRunLoopTimerInvalidate(self._edge_timer)
+            self._edge_timer = None
+
+    def _edge_dwell_completed(self, _timer: Any) -> None:
+        with self._lock:
+            self._edge_timer = None
+            if self._state is not Host.LOCAL:
+                return
+            if (
+                not self._control_held
+                or self._pointer_x is None
+                or self._active_left_edge is None
+            ):
+                return
+            if self._pointer_x > self._active_left_edge:
+                return
+
+        try:
+            screen_sharing_connected = (
+                self.system_state.is_screen_sharing_connected()
+            )
+        except RuntimeError:
+            LOG.exception("Could not verify Screen Sharing state; remaining local")
+            return
+
+        if not screen_sharing_connected:
+            with self._lock:
+                if (
+                    self._state is Host.LOCAL
+                    and self._control_held
+                    and self._pointer_x is not None
+                    and self._active_left_edge is not None
+                    and self._pointer_x <= self._active_left_edge
+                ):
+                    self._state = Host.REMOTE
 
 
 class HomeAssistantWebhookClient:
@@ -200,7 +468,7 @@ def configure_logging(config: Config) -> None:
 
 
 def run(config: Config, detector: HostDetector | None = None) -> None:
-    detector = detector or ScreenSharingHostDetector(
+    detector = detector or QuartzHostDetector(
         SystemState(config.screen_sharing_port)
     )
     webhook = HomeAssistantWebhookClient(
