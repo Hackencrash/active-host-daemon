@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report active macOS Screen Sharing sessions to Home Assistant.
+"""Report whether the local or remote host is in control to Home Assistant.
 
 The module deliberately keeps detection, state changes, and notification separate so
 other activity sources (notably gesture detection) can be added without changing the
@@ -9,6 +9,7 @@ daemon loop or Home Assistant integration.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import logging.handlers
 import signal
@@ -18,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
@@ -29,30 +31,36 @@ LOG = logging.getLogger("active_host")
 STOP = Event()
 
 
-class ActivityDetector(Protocol):
-    """An activity source that can be sampled by the daemon."""
+class Host(Enum):
+    LOCAL = "local"
+    REMOTE = "remote"
 
-    def is_active(self) -> bool: ...
+
+class HostDetector(Protocol):
+    """A host source that can be sampled by the daemon."""
+
+    def current_host(self) -> Host: ...
 
 
 @dataclass(frozen=True)
 class Config:
+    local_host: str
+    remote_host: str
     poll_interval: float
     screen_sharing_port: int
-    active_webhook_url: str
-    inactive_webhook_url: str
+    webhook: str
     request_timeout: float
     log_level: str
     log_file: Path | None
 
 
-class ScreenSharingDetector:
-    """Detect established TCP connections to the local Screen Sharing port."""
+class SystemState:
+    """Read low-level operating-system state used by host detection policies."""
 
     def __init__(self, port: int = 5900) -> None:
         self.port = port
 
-    def is_active(self) -> bool:
+    def is_screen_sharing_connected(self) -> bool:
         command = [
             "/usr/sbin/lsof",
             "-nP",
@@ -77,16 +85,39 @@ class ScreenSharingDetector:
         )
 
 
+class ScreenSharingHostDetector:
+    """Select the host from the current operating-system state."""
+
+    def __init__(self, system_state: SystemState) -> None:
+        self.system_state = system_state
+
+    def current_host(self) -> Host:
+        if self.system_state.is_screen_sharing_connected():
+            return Host.REMOTE
+        return Host.LOCAL
+
+
 class HomeAssistantWebhookClient:
-    def __init__(self, active_url: str, inactive_url: str, timeout: float) -> None:
-        self.urls = {True: active_url, False: inactive_url}
+    def __init__(
+        self, webhook: str, local_host: str, remote_host: str, timeout: float
+    ) -> None:
+        self.webhook = webhook
+        self.local_host = local_host
+        self.remote_host = remote_host
         self.timeout = timeout
 
-    def send(self, active: bool) -> None:
-        state = "active" if active else "inactive"
+    def send(self, detected_host: Host) -> None:
+        resolved_host = (
+            self.local_host if detected_host is Host.LOCAL else self.remote_host
+        )
+        payload = {
+            "host": resolved_host,
+            "source": "active-host-daemon",
+            "timestamp": int(time.time()),
+        }
         request = urllib.request.Request(
-            self.urls[active],
-            data=b"{}",
+            self.webhook,
+            data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json", "User-Agent": "active-host-daemon/1"},
             method="POST",
         )
@@ -95,13 +126,15 @@ class HomeAssistantWebhookClient:
                 if not 200 <= response.status < 300:
                     raise RuntimeError(f"webhook returned HTTP {response.status}")
         except (urllib.error.URLError, TimeoutError) as exc:
-            raise RuntimeError(f"failed to send {state} webhook: {exc}") from exc
-        LOG.info("Sent Home Assistant %s webhook", state)
+            raise RuntimeError(
+                f"failed to send {detected_host.value} webhook: {exc}"
+            ) from exc
+        LOG.info("Sent Home Assistant %s webhook", detected_host.value)
 
 
-def _require(mapping: dict[str, Any], key: str, expected: type) -> Any:
+def _require(mapping: dict[str, Any], key: str, expected: type[str]) -> str:
     value = mapping.get(key)
-    if not isinstance(value, expected) or (expected is str and not value.strip()):
+    if not isinstance(value, expected) or not value.strip():
         raise ValueError(f"config value '{key}' must be a non-empty {expected.__name__}")
     return value
 
@@ -116,6 +149,9 @@ def load_config(path: Path) -> Config:
 
     if not isinstance(raw, dict):
         raise ValueError("config root must be a mapping")
+    hosts = raw.get("hosts")
+    if not isinstance(hosts, dict):
+        raise ValueError("config section 'hosts' must be a mapping")
     ha = raw.get("home_assistant")
     if not isinstance(ha, dict):
         raise ValueError("config section 'home_assistant' must be a mapping")
@@ -134,10 +170,11 @@ def load_config(path: Path) -> Config:
     log_file_value = logging_config.get("file")
     log_file = Path(log_file_value).expanduser() if log_file_value else None
     return Config(
+        local_host=_require(hosts, "local", str),
+        remote_host=_require(hosts, "remote", str),
         poll_interval=poll_interval,
         screen_sharing_port=port,
-        active_webhook_url=_require(ha, "active_webhook_url", str),
-        inactive_webhook_url=_require(ha, "inactive_webhook_url", str),
+        webhook=_require(ha, "webhook", str),
         request_timeout=request_timeout,
         log_level=str(logging_config.get("level", "INFO")).upper(),
         log_file=log_file,
@@ -162,21 +199,26 @@ def configure_logging(config: Config) -> None:
     logging.basicConfig(level=level, handlers=handlers, force=True)
 
 
-def run(config: Config, detector: ActivityDetector | None = None) -> None:
-    detector = detector or ScreenSharingDetector(config.screen_sharing_port)
-    webhooks = HomeAssistantWebhookClient(
-        config.active_webhook_url, config.inactive_webhook_url, config.request_timeout
+def run(config: Config, detector: HostDetector | None = None) -> None:
+    detector = detector or ScreenSharingHostDetector(
+        SystemState(config.screen_sharing_port)
     )
-    last_state: bool | None = None
+    webhook = HomeAssistantWebhookClient(
+        config.webhook,
+        config.local_host,
+        config.remote_host,
+        config.request_timeout,
+    )
+    last_host: Host | None = None
     LOG.info("Starting; polling Screen Sharing every %.1f seconds", config.poll_interval)
 
     while not STOP.is_set():
         try:
-            active = detector.is_active()
-            if active != last_state:
-                LOG.info("Activity changed to %s", "active" if active else "inactive")
-                webhooks.send(active)
-                last_state = active
+            host = detector.current_host()
+            if host is not last_host:
+                LOG.info("Host changed to %s", host.value)
+                webhook.send(host)
+                last_host = host
         except RuntimeError:
             LOG.exception("Poll failed; will retry")
         STOP.wait(config.poll_interval)

@@ -1,9 +1,12 @@
-poll_interval: 5
+hosts:
+  local: "macmini"
+  remote: "laptop"
+
+poll_interval: 1
 screen_sharing_port: 5900
 
 home_assistant:
-  active_webhook_url: "http://192.168.26.182:8123/api/webhook/active_host_active"
-  inactive_webhook_url: "http://192.168.26.182:8123/api/webhook/active_host_inactive"
+  webhook: "http://192.168.26.182:8123/api/webhook/active_host"
   request_timeout: 10
 
 logging:
