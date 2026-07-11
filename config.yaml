@@ -1,0 +1,12 @@
+poll_interval: 5
+screen_sharing_port: 5900
+
+home_assistant:
+  active_webhook_url: "http://192.168.26.182:8123/api/webhook/active_host_active"
+  inactive_webhook_url: "http://192.168.26.182:8123/api/webhook/active_host_inactive"
+  request_timeout: 10
+
+logging:
+  level: INFO
+  # Uncomment to enable a rotating log file. Console logging is always enabled.
+  # file: "~/Library/Logs/active-host-daemon.log"
