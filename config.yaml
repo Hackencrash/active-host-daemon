@@ -1,0 +1,27 @@
+version: 1
+
+host_names:
+  local: macmini
+  remote: laptop
+
+gesture:
+  edge: left
+  ctrl_required: true
+  timeout: 0.75
+  travel: 100
+
+screen_sharing:
+  ignore: true
+
+home_assistant:
+  enabled: true
+  webhook: "http://192.168.26.182:8123/api/webhook/active_host"
+  timeout: 2
+
+logging:
+  level: INFO
+  file: logs/active_host.log
+  console: true
+
+debug:
+  dry_run: false

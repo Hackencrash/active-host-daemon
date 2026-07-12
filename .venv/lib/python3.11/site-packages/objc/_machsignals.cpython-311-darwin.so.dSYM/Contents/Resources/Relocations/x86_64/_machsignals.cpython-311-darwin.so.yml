@@ -1,0 +1,21 @@
+---
+triple:          'x86_64-apple-darwin'
+binary-path:     'build/lib.macosx-10.9-universal2-cpython-311/objc/_machsignals.cpython-311-darwin.so'
+relocations:
+  - { offset: 0x28, size: 0x8, addend: 0x0, symName: _PyInit__machsignals, symObjAddr: 0x0, symBinAddr: 0x6D0, symSize: 0x20 }
+  - { offset: 0x53, size: 0x8, addend: 0x0, symName: _mod_module, symObjAddr: 0x2D0, symBinAddr: 0x10D0, symSize: 0x0 }
+  - { offset: 0xE14, size: 0x8, addend: 0x0, symName: _machsignals_doc, symObjAddr: 0x470, symBinAddr: 0xBE0, symSize: 0x0 }
+  - { offset: 0xE36, size: 0x8, addend: 0x0, symName: _mod_methods, symObjAddr: 0x340, symBinAddr: 0x1140, symSize: 0x0 }
+  - { offset: 0xE4B, size: 0x8, addend: 0x0, symName: _machsignals_handleSignal, symObjAddr: 0x20, symBinAddr: 0x6F0, symSize: 0x60 }
+  - { offset: 0xE76, size: 0x8, addend: 0x0, symName: _machsignals_handleSignal.keywords, symObjAddr: 0x380, symBinAddr: 0x1180, symSize: 0x0 }
+  - { offset: 0xEF2, size: 0x8, addend: 0x0, symName: _exit_m_port, symObjAddr: 0x50C8, symBinAddr: 0x11B8, symSize: 0x0 }
+  - { offset: 0xF33, size: 0x8, addend: 0x0, symName: _machsignals_handleSignal_doc, symObjAddr: 0x590, symBinAddr: 0xD00, symSize: 0x0 }
+  - { offset: 0xF54, size: 0x8, addend: 0x0, symName: _mod_slots, symObjAddr: 0x390, symBinAddr: 0x1190, symSize: 0x0 }
+  - { offset: 0xF75, size: 0x8, addend: 0x0, symName: _PyObjC_API, symObjAddr: 0x50D8, symBinAddr: 0x11C8, symSize: 0x0 }
+  - { offset: 0x151D, size: 0x8, addend: 0x0, symName: _signalmapping, symObjAddr: 0x50D0, symBinAddr: 0x11C0, symSize: 0x0 }
+  - { offset: 0x15D5, size: 0x8, addend: 0x0, symName: _PyInit__machsignals, symObjAddr: 0x0, symBinAddr: 0x6D0, symSize: 0x20 }
+  - { offset: 0x160D, size: 0x8, addend: 0x0, symName: _HandleSIG, symObjAddr: 0x80, symBinAddr: 0x750, symSize: 0x40 }
+  - { offset: 0x1660, size: 0x8, addend: 0x0, symName: _mod_exec_module, symObjAddr: 0xC0, symBinAddr: 0x790, symSize: 0x100 }
+  - { offset: 0x172B, size: 0x8, addend: 0x0, symName: _SIGCallback, symObjAddr: 0x1C0, symBinAddr: 0x890, symSize: 0xF0 }
+  - { offset: 0x1889, size: 0x8, addend: 0x0, symName: _Py_DECREF, symObjAddr: 0x2B0, symBinAddr: 0x980, symSize: 0x11 }
+...
