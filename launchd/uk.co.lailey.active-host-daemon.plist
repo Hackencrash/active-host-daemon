@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Label uniquely identifies this LaunchAgent to launchd. -->
+    <key>Label</key>
+    <string>uk.co.lailey.active-host-daemon</string>
+
+    <!-- ProgramArguments starts a shell that resolves $HOME for the log paths,
+         then replaces itself with the project's virtual-environment Python.
+         __PROJECT_ROOT__ is replaced with the absolute project path at install time. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>exec "__PROJECT_ROOT__/.venv/bin/python" "__PROJECT_ROOT__/active_host.py" --config "__PROJECT_ROOT__/config.yaml" &gt;&gt; "$HOME/Library/Logs/active-host-daemon.log" 2&gt;&gt; "$HOME/Library/Logs/active-host-daemon-error.log"</string>
+    </array>
+
+    <!-- WorkingDirectory makes the project root the daemon's current directory. -->
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_ROOT__</string>
+
+    <!-- RunAtLoad starts the daemon when this LaunchAgent is loaded at login. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- KeepAlive restarts the daemon whenever it exits. -->
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>

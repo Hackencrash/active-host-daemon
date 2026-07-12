@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum
@@ -31,6 +32,11 @@ import yaml
 
 LOG = logging.getLogger("active_host")
 STOP = Event()
+__version__ = "1.0.0"
+
+
+class QuartzPermissionError(RuntimeError):
+    """Raised when macOS prevents creation of the Quartz event tap."""
 
 
 class Host(Enum):
@@ -182,11 +188,23 @@ class QuartzHostDetector:
                 None,
             )
             if self._event_tap is None:
-                reason = (
-                    "could not create Quartz event tap; grant Accessibility permission"
+                guidance = (
+                    "Accessibility permission has not been granted.\n\n"
+                    "Please enable permission for the Python interpreter running "
+                    "active-host-daemon under:\n\n"
+                    "System Settings\n"
+                    "→ Privacy & Security\n"
+                    "→ Accessibility\n\n"
+                    "and, if required,\n\n"
+                    "System Settings\n"
+                    "→ Privacy & Security\n"
+                    "→ Input Monitoring\n\n"
+                    "After granting permission restart the LaunchAgent."
                 )
-                LOG.error("%s", reason)
-                raise RuntimeError(reason)
+                LOG.error("%s", guidance)
+                raise QuartzPermissionError(
+                    "Accessibility permission has not been granted."
+                )
             LOG.info("Quartz event tap created")
 
             self._run_loop_source = quartz.CFMachPortCreateRunLoopSource(
@@ -230,6 +248,9 @@ class QuartzHostDetector:
             LOG.info("Entering Quartz run loop")
             quartz.CFRunLoopRun()
             LOG.error("Quartz run loop exited unexpectedly")
+        except QuartzPermissionError as exc:
+            self._startup_error = exc
+            self._ready.set()
         except (ImportError, RuntimeError) as exc:
             self._startup_error = RuntimeError(f"failed to start Quartz detector: {exc}")
             self._ready.set()
@@ -569,17 +590,28 @@ def configure_logging(config: Config) -> None:
     logging.basicConfig(level=level, handlers=handlers, force=True)
 
 
+def validate_webhook_url(webhook: str) -> None:
+    parsed = urllib.parse.urlsplit(webhook)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(
+            "home_assistant.webhook must be an absolute HTTP or HTTPS URL"
+        )
+
+
 def run(config: Config, detector: HostDetector | None = None) -> None:
     detector = detector or QuartzHostDetector(
         SystemState(config.screen_sharing_port)
     )
+    LOG.info("Quartz detector initialised")
     webhook = HomeAssistantWebhookClient(
         config.webhook,
         config.local_host,
         config.remote_host,
         config.request_timeout,
     )
+    LOG.info("Home Assistant webhook configured")
     last_host: Host | None = None
+    LOG.info("Daemon started successfully")
     LOG.info("Starting; polling Screen Sharing every %.1f seconds", config.poll_interval)
 
     while not STOP.is_set():
@@ -598,6 +630,9 @@ def run(config: Config, detector: HostDetector | None = None) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--version", action="version", version=f"Active Host Daemon v{__version__}"
+    )
+    parser.add_argument(
         "--config", type=Path, default=Path(__file__).with_name("config.yaml")
     )
     parser.add_argument("--check", action="store_true", help="validate config and exit")
@@ -606,15 +641,35 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         configure_logging(config)
     except ValueError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
+        print(f"ERROR: Configuration validation failed: {exc}", file=sys.stderr)
         return 2
+    LOG.info("-------------------------------------------------")
+    LOG.info("Active Host Daemon v%s", __version__)
+    LOG.info("-------------------------------------------------")
+    LOG.info("Project directory: %s", Path(__file__).resolve().parent)
+    LOG.info("Python executable: %s", sys.executable)
+    LOG.info("Configuration file: %s", args.config.resolve())
+    LOG.info("Polling interval: %.1f seconds", config.poll_interval)
+    LOG.info("Configuration loaded successfully")
+    try:
+        validate_webhook_url(config.webhook)
+    except ValueError as exc:
+        LOG.error("Home Assistant webhook validation failed: %s", exc)
+        return 2
+    LOG.info("Home Assistant webhook URL parsed successfully")
     if args.check:
         LOG.info("Configuration is valid")
         return 0
 
     signal.signal(signal.SIGTERM, lambda *_: STOP.set())
     signal.signal(signal.SIGINT, lambda *_: STOP.set())
-    run(config)
+    try:
+        run(config)
+    except QuartzPermissionError:
+        return 1
+    except RuntimeError as exc:
+        LOG.error("Daemon startup failed: %s", exc)
+        return 1
     return 0
 
 
