@@ -116,6 +116,8 @@ class QuartzHostDetector:
         self._pointer_x: float | None = None
         self._active_left_edge: float | None = None
         self._approach_start_x: float | None = None
+        self._at_edge = False
+        self._ctrl_release_ignored = False
         self._edge_timer: Any = None
         self._lock = threading.Lock()
         self._ready = threading.Event()
@@ -301,6 +303,18 @@ class QuartzHostDetector:
                     return event
                 self._transition_to_local_locked()
 
+            if (
+                self._control_held
+                and not control_held
+                and self._edge_timer is not None
+            ):
+                if not self._ctrl_release_ignored:
+                    LOG.info("Ignoring Ctrl release after edge dwell started")
+                    self._ctrl_release_ignored = True
+                control_held = True
+
+            if control_held != self._control_held:
+                LOG.info("Ctrl pressed" if control_held else "Ctrl released")
             self._control_held = control_held
             if event_type in mouse_movement_events:
                 location = quartz.CGEventGetLocation(event)
@@ -313,13 +327,18 @@ class QuartzHostDetector:
 
                 if active_left_edge != self._active_left_edge:
                     self._active_left_edge = active_left_edge
+                    if self._approach_start_x is not None:
+                        LOG.info("Gesture cancelled")
                     self._approach_start_x = None
                     self._cancel_edge_dwell_locked()
 
                 if moving_towards_edge and self._control_held:
                     if self._approach_start_x is None:
                         self._approach_start_x = previous_x
+                        LOG.info("Gesture started")
                 elif previous_x is not None and location.x > previous_x:
+                    if self._approach_start_x is not None:
+                        LOG.info("Gesture cancelled")
                     self._approach_start_x = None
                     self._cancel_edge_dwell_locked()
 
@@ -329,6 +348,10 @@ class QuartzHostDetector:
                     else 0.0
                 )
                 at_edge = location.x <= active_left_edge
+                if at_edge and not self._at_edge:
+                    LOG.info("Reached edge")
+                    LOG.info("Travel distance: %.1f pixels", horizontal_travel)
+                self._at_edge = at_edge
                 if (
                     at_edge
                     and self._control_held
@@ -340,6 +363,8 @@ class QuartzHostDetector:
                     self._cancel_edge_dwell_locked()
 
             if not self._control_held:
+                if self._approach_start_x is not None:
+                    LOG.info("Gesture cancelled")
                 self._approach_start_x = None
                 self._cancel_edge_dwell_locked()
         return event
@@ -373,10 +398,12 @@ class QuartzHostDetector:
 
     def _transition_to_local_locked(self) -> None:
         self._state = Host.LOCAL
+        LOG.info("Transition REMOTE -> LOCAL")
         self._cancel_edge_dwell_locked()
 
     def _start_edge_dwell_locked(self) -> None:
         self._cancel_edge_dwell_locked()
+        LOG.info("Starting dwell timer")
         quartz = self._quartz
         fire_at = quartz.CFAbsoluteTimeGetCurrent() + self.edge_delay
         self._edge_timer = quartz.CFRunLoopTimerCreateWithHandler(
@@ -397,8 +424,11 @@ class QuartzHostDetector:
         if self._edge_timer is not None:
             self._quartz.CFRunLoopTimerInvalidate(self._edge_timer)
             self._edge_timer = None
+            LOG.info("Dwell timer cancelled")
+        self._ctrl_release_ignored = False
 
     def _edge_dwell_completed(self, _timer: Any) -> None:
+        LOG.info("Dwell timer fired")
         with self._lock:
             self._edge_timer = None
             if self._state is not Host.LOCAL:
@@ -430,6 +460,11 @@ class QuartzHostDetector:
                     and self._pointer_x <= self._active_left_edge
                 ):
                     self._state = Host.REMOTE
+                    LOG.info("Transition LOCAL -> REMOTE")
+                self._ctrl_release_ignored = False
+        else:
+            with self._lock:
+                self._ctrl_release_ignored = False
 
 
 class HomeAssistantWebhookClient:
