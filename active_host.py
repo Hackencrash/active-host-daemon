@@ -174,15 +174,19 @@ class QuartzHostDetector:
                 None,
             )
             if self._event_tap is None:
-                raise RuntimeError(
+                reason = (
                     "could not create Quartz event tap; grant Accessibility permission"
                 )
+                LOG.error("%s", reason)
+                raise RuntimeError(reason)
+            LOG.info("Quartz event tap created")
 
             source = quartz.CFMachPortCreateRunLoopSource(None, self._event_tap, 0)
             self._run_loop = quartz.CFRunLoopGetCurrent()
             quartz.CFRunLoopAddSource(
                 self._run_loop, source, quartz.kCFRunLoopCommonModes
             )
+            LOG.info("Quartz run loop started")
             quartz.CGEventTapEnable(self._event_tap, True)
             self._ready.set()
             quartz.CFRunLoopRun()
@@ -193,6 +197,7 @@ class QuartzHostDetector:
     def _handle_event(
         self, _proxy: Any, event_type: int, event: Any, _refcon: Any
     ) -> Any:
+        LOG.debug("Quartz callback: event_type=%s", event_type)
         quartz = self._quartz
         if event_type in (
             quartz.kCGEventTapDisabledByTimeout,
