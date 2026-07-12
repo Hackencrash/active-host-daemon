@@ -9,6 +9,10 @@ home_assistant:
   webhook: "http://192.168.26.182:8123/api/webhook/active_host"
   request_timeout: 10
 
+display:
+  wake_on_local: true
+  wake_duration: 5
+
 logging:
   level: INFO
   # Uncomment to enable a rotating log file. Console logging is always enabled.

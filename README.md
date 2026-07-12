@@ -18,6 +18,7 @@ returns control to the local host.
 - Multi-display left-edge detection
 - Screen Sharing safety check
 - Home Assistant webhook notifications on host changes
+- Optional display wake when control returns from a Logitech Flow peer
 - Automatic startup and restart through launchd
 - Event-tap health watchdog and operational diagnostics
 - Install, start, stop, restart, status, and uninstall commands
@@ -69,7 +70,23 @@ logging:
 - `screen_sharing_port` is the local Screen Sharing TCP port.
 - `home_assistant.webhook` must be an absolute HTTP or HTTPS URL.
 - `request_timeout` is the webhook timeout in seconds.
+- `display.wake_on_local` enables display wake on a remote-to-local transition.
+- `display.wake_duration` controls how long `caffeinate` registers user activity.
 - `logging.level` accepts standard Python logging levels such as `INFO` or `DEBUG`.
+
+Display wake is optional and disabled when the `display` section is omitted. To
+enable it, add:
+
+```yaml
+display:
+  wake_on_local: true
+  wake_duration: 5
+```
+
+This is intended for Logitech Flow users whose destination Mac remains awake while
+its display has gone to sleep. When control returns from the remote host to the
+local Mac, the daemon runs `/usr/bin/caffeinate -u -t 5` asynchronously to register
+user activity and wake the display. It never runs during a local-to-remote transfer.
 
 Validate configuration without starting the detector:
 

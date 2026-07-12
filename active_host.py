@@ -58,6 +58,8 @@ class Config:
     screen_sharing_port: int
     webhook: str
     request_timeout: float
+    display_wake_on_local: bool
+    display_wake_duration: int
     log_level: str
     log_file: Path | None
 
@@ -523,6 +525,27 @@ class HomeAssistantWebhookClient:
         LOG.info("Sent Home Assistant %s webhook", detected_host.value)
 
 
+class DisplayWakeManager:
+    """Wake the display asynchronously when the optional feature is enabled."""
+
+    def __init__(self, enabled: bool, duration: int) -> None:
+        self.enabled = enabled
+        self.duration = duration
+
+    def wake(self) -> None:
+        if not self.enabled:
+            return
+        LOG.info("Waking display")
+        try:
+            subprocess.Popen(
+                ["/usr/bin/caffeinate", "-u", "-t", str(self.duration)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            LOG.exception("Unable to wake display")
+
+
 def _require(mapping: dict[str, Any], key: str, expected: type[str]) -> str:
     value = mapping.get(key)
     if not isinstance(value, expected) or not value.strip():
@@ -549,6 +572,9 @@ def load_config(path: Path) -> Config:
     logging_config = raw.get("logging", {})
     if not isinstance(logging_config, dict):
         raise ValueError("config section 'logging' must be a mapping")
+    display_config = raw.get("display", {})
+    if not isinstance(display_config, dict):
+        raise ValueError("config section 'display' must be a mapping")
 
     poll_interval = float(raw.get("poll_interval", 5))
     request_timeout = float(ha.get("request_timeout", 10))
@@ -557,6 +583,16 @@ def load_config(path: Path) -> Config:
         raise ValueError("poll_interval and request_timeout must be greater than zero")
     if not 1 <= port <= 65535:
         raise ValueError("screen_sharing_port must be between 1 and 65535")
+    wake_on_local = display_config.get("wake_on_local", False)
+    if not isinstance(wake_on_local, bool):
+        raise ValueError("config value 'display.wake_on_local' must be a boolean")
+    wake_duration = display_config.get("wake_duration", 5)
+    if (
+        not isinstance(wake_duration, int)
+        or isinstance(wake_duration, bool)
+        or wake_duration <= 0
+    ):
+        raise ValueError("config value 'display.wake_duration' must be a positive integer")
 
     log_file_value = logging_config.get("file")
     log_file = Path(log_file_value).expanduser() if log_file_value else None
@@ -567,6 +603,8 @@ def load_config(path: Path) -> Config:
         screen_sharing_port=port,
         webhook=_require(ha, "webhook", str),
         request_timeout=request_timeout,
+        display_wake_on_local=wake_on_local,
+        display_wake_duration=wake_duration,
         log_level=str(logging_config.get("level", "INFO")).upper(),
         log_file=log_file,
     )
@@ -610,6 +648,13 @@ def run(config: Config, detector: HostDetector | None = None) -> None:
         config.request_timeout,
     )
     LOG.info("Home Assistant webhook configured")
+    display_wake = DisplayWakeManager(
+        config.display_wake_on_local, config.display_wake_duration
+    )
+    if config.display_wake_on_local:
+        LOG.info("Display wake:\nEnabled (%d seconds)", config.display_wake_duration)
+    else:
+        LOG.info("Display wake:\nDisabled")
     last_host: Host | None = None
     LOG.info("Daemon started successfully")
     LOG.info("Starting; polling Screen Sharing every %.1f seconds", config.poll_interval)
@@ -620,6 +665,8 @@ def run(config: Config, detector: HostDetector | None = None) -> None:
             if host is not last_host:
                 LOG.info("Host changed to %s", host.value)
                 webhook.send(host)
+                if last_host is Host.REMOTE and host is Host.LOCAL:
+                    display_wake.wake()
                 last_host = host
         except RuntimeError:
             LOG.exception("Poll failed; will retry")
