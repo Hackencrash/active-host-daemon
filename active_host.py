@@ -123,8 +123,13 @@ class QuartzHostDetector:
         self._quartz: Any = None
         self._event_tap: Any = None
         self._run_loop: Any = None
+        self._run_loop_source: Any = None
+        self._heartbeat_timer: Any = None
+        self._watchdog_timer: Any = None
         self._callback = self._handle_event
         self._timer_callback = self._edge_dwell_completed
+        self._heartbeat_callback = self._log_heartbeat
+        self._watchdog_callback = self._check_event_tap
 
         thread = threading.Thread(
             target=self._run_event_tap,
@@ -142,6 +147,7 @@ class QuartzHostDetector:
             return self._state
 
     def _run_event_tap(self) -> None:
+        LOG.info("Quartz thread started")
         try:
             quartz = importlib.import_module("Quartz")
             self._quartz = quartz
@@ -181,15 +187,47 @@ class QuartzHostDetector:
                 raise RuntimeError(reason)
             LOG.info("Quartz event tap created")
 
-            source = quartz.CFMachPortCreateRunLoopSource(None, self._event_tap, 0)
+            self._run_loop_source = quartz.CFMachPortCreateRunLoopSource(
+                None, self._event_tap, 0
+            )
             self._run_loop = quartz.CFRunLoopGetCurrent()
             quartz.CFRunLoopAddSource(
-                self._run_loop, source, quartz.kCFRunLoopCommonModes
+                self._run_loop,
+                self._run_loop_source,
+                quartz.kCFRunLoopCommonModes,
             )
             LOG.info("Quartz run loop started")
+            self._heartbeat_timer = quartz.CFRunLoopTimerCreateWithHandler(
+                None,
+                quartz.CFAbsoluteTimeGetCurrent() + 60.0,
+                60.0,
+                0,
+                0,
+                self._heartbeat_callback,
+            )
+            quartz.CFRunLoopAddTimer(
+                self._run_loop,
+                self._heartbeat_timer,
+                quartz.kCFRunLoopCommonModes,
+            )
+            self._watchdog_timer = quartz.CFRunLoopTimerCreateWithHandler(
+                None,
+                quartz.CFAbsoluteTimeGetCurrent() + 5.0,
+                5.0,
+                0,
+                0,
+                self._watchdog_callback,
+            )
+            quartz.CFRunLoopAddTimer(
+                self._run_loop,
+                self._watchdog_timer,
+                quartz.kCFRunLoopCommonModes,
+            )
             quartz.CGEventTapEnable(self._event_tap, True)
             self._ready.set()
+            LOG.info("Entering Quartz run loop")
             quartz.CFRunLoopRun()
+            LOG.error("Quartz run loop exited unexpectedly")
         except (ImportError, RuntimeError) as exc:
             self._startup_error = RuntimeError(f"failed to start Quartz detector: {exc}")
             self._ready.set()
@@ -197,12 +235,20 @@ class QuartzHostDetector:
     def _handle_event(
         self, _proxy: Any, event_type: int, event: Any, _refcon: Any
     ) -> Any:
-        LOG.debug("Quartz callback: event_type=%s", event_type)
+        try:
+            LOG.debug("Quartz callback: event_type=%s", event_type)
+            return self._handle_event_safely(event_type, event)
+        except Exception:
+            LOG.exception("Unhandled exception in Quartz callback")
+        return event
+
+    def _handle_event_safely(self, event_type: int, event: Any) -> Any:
         quartz = self._quartz
         if event_type in (
             quartz.kCGEventTapDisabledByTimeout,
             quartz.kCGEventTapDisabledByUserInput,
         ):
+            LOG.warning("Quartz event tap disabled by macOS - re-enabling")
             quartz.CGEventTapEnable(self._event_tap, True)
             return event
 
@@ -297,6 +343,22 @@ class QuartzHostDetector:
                 self._approach_start_x = None
                 self._cancel_edge_dwell_locked()
         return event
+
+    def _log_heartbeat(self, _timer: Any) -> None:
+        LOG.debug("Quartz run loop still active")
+
+    def _check_event_tap(self, _timer: Any) -> None:
+        quartz = self._quartz
+        if quartz.CGEventTapIsEnabled(self._event_tap):
+            LOG.debug("Quartz event tap healthy")
+            return
+
+        LOG.error("Quartz event tap is disabled")
+        quartz.CGEventTapEnable(self._event_tap, True)
+        if quartz.CGEventTapIsEnabled(self._event_tap):
+            LOG.warning("Quartz event tap re-enabled")
+        else:
+            LOG.error("Quartz event tap could not be re-enabled")
 
     def _display_left_edge(self, location: Any) -> float:
         quartz = self._quartz
